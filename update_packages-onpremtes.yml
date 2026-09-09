@@ -1,13 +1,8 @@
 ---
 - name: Professional Linux Patching Report
   hosts: all
-#  become: yes
-#  gather_facts: yes
-
   become: yes
-  become_method: sudo
-  become_user: root
-  become_flags: "-n"
+  gather_facts: yes
 
   vars:
     reboot_required_file: /var/run/reboot-required
@@ -42,13 +37,17 @@
       when: ansible_os_family == "Debian"
 
     #################################################################
-    # UPDATE PROCESS
+    # UPDATE APT CACHE
     #################################################################
 
     - name: Update apt cache
       apt:
         update_cache: yes
       when: ansible_os_family == "Debian"
+
+    #################################################################
+    # PATCH
+    #################################################################
 
     - name: Upgrade installed packages
       apt:
@@ -57,10 +56,6 @@
         autoclean: yes
       register: patch_result
       when: ansible_os_family == "Debian"
-
-    #################################################################
-    # SHOW RESULT
-    #################################################################
 
     - name: Show patch result
       debug:
@@ -92,13 +87,44 @@
         - not reboot_flag.stat.exists
 
     #################################################################
-    # OPTIONAL AUTO REBOOT
+    # REBOOT
     #################################################################
 
     - name: Reboot server if required
-      reboot:
-        msg: "Automatic reboot after patching"
-        reboot_timeout: 600
+      shell: |
+        (sleep 2; sudo -n /sbin/reboot) >/dev/null 2>&1 &
+      become: false
+      async: 1
+      poll: 0
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_flag.stat.exists
+
+    #################################################################
+    # WAIT FOR SERVER
+    #################################################################
+
+    - name: Wait for server to come back
+      wait_for_connection:
+        delay: 10
+        timeout: 300
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_flag.stat.exists
+
+    #################################################################
+    # POST-CHECK
+    #################################################################
+
+    - name: Gather facts after reboot
+      setup:
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_flag.stat.exists
+
+    - name: Show kernel after patching
+      debug:
+        msg: "Running Kernel: {{ ansible_kernel }}"
       when:
         - ansible_os_family == "Debian"
         - reboot_flag.stat.exists
@@ -109,4 +135,7 @@
 
     - name: Final summary
       debug:
-        msg: "Patching completed successfully on {{ inventory_hostname }}"
+        msg: >-
+          Patching completed successfully on {{ inventory_hostname }}.
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}.
+          Kernel: {{ ansible_kernel }}.
