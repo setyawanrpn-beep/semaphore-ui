@@ -1,0 +1,14 @@
+---
+- name: Test APT Privilege
+  hosts: 182.253.203.157
+  become: yes
+  become_method: sudo
+  become_user: root
+  become_flags: "-n"
+  gather_facts: yes
+
+  tasks:
+
+    - name: Test apt update
+      ansible.builtin.apt:
+        update_cache: yes
