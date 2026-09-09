@@ -1,0 +1,126 @@
+---
+- name: Patch Management v5 - Assessment
+  hosts: all
+  gather_facts: yes
+  become: false
+
+  tasks:
+
+    # =========================================================
+    # IDENTIFICATION
+    # =========================================================
+
+    - name: Record assessment information
+      ansible.builtin.set_fact:
+        assessment_time: "{{ ansible_date_time.iso8601 }}"
+        target_host: "{{ inventory_hostname }}"
+        hostname: "{{ ansible_hostname }}"
+        kernel_before: "{{ ansible_kernel }}"
+        os_name: "{{ ansible_distribution }}"
+        os_version: "{{ ansible_distribution_version }}"
+        primary_ip: "{{ ansible_default_ipv4.address | default(inventory_hostname) }}"
+
+    # =========================================================
+    # SYSTEM HEALTH
+    # =========================================================
+
+    - name: Check uptime
+      ansible.builtin.shell: |
+        uptime -p
+      register: uptime_result
+      changed_when: false
+      failed_when: false
+
+    - name: Check package health
+      ansible.builtin.shell: |
+        dpkg --audit
+      register: dpkg_audit
+      changed_when: false
+      failed_when: false
+
+    # =========================================================
+    # APT ASSESSMENT
+    # =========================================================
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+      become: yes
+      become_method: sudo
+      become_user: root
+      become_flags: "-n"
+
+    - name: Get available updates
+      ansible.builtin.shell: |
+        apt list --upgradable 2>/dev/null | tail -n +2
+      register: available_updates
+      changed_when: false
+      failed_when: false
+
+    - name: Calculate patch count
+      ansible.builtin.set_fact:
+        available_patch_count: >-
+          {{
+            available_updates.stdout_lines
+            | select('match', '^[^ ]+')
+            | list
+            | length
+          }}
+
+    # =========================================================
+    # REBOOT ASSESSMENT
+    # =========================================================
+
+    - name: Check reboot requirement
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_file
+
+    - name: Determine assessment status
+      ansible.builtin.set_fact:
+        assessment_status: >-
+          {{
+            'COMPLIANT'
+            if available_patch_count | int == 0
+            else 'PATCH REQUIRED'
+          }}
+
+        package_health: >-
+          {{
+            'OK'
+            if dpkg_audit.stdout | trim == ''
+            else 'ATTENTION'
+          }}
+
+        reboot_required: "{{ reboot_file.stat.exists | default(false) }}"
+
+    # =========================================================
+    # ASSESSMENT REPORT
+    # =========================================================
+
+    - name: Patch Assessment Evidence
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "             PATCH ASSESSMENT v5"
+          - "============================================================"
+          - "Assessment Time     : {{ assessment_time }}"
+          - "Inventory Target    : {{ target_host }}"
+          - "Hostname            : {{ hostname }}"
+          - "Primary IP          : {{ primary_ip }}"
+          - "Environment         : {{ var_environment | default('N/A') }}"
+          - "OS                  : {{ os_name }} {{ os_version }}"
+          - "Uptime              : {{ uptime_result.stdout | trim }}"
+          - "Kernel              : {{ kernel_before }}"
+          - "------------------------------------------------------------"
+          - "PATCH ASSESSMENT"
+          - "Available Patches   : {{ available_patch_count }}"
+          - "Assessment Status   : {{ assessment_status }}"
+          - "------------------------------------------------------------"
+          - "SYSTEM HEALTH"
+          - "Package Health      : {{ package_health }}"
+          - "Reboot Required     : {{ reboot_required }}"
+          - "------------------------------------------------------------"
+          - "AVAILABLE PATCHES"
+          - "{{ available_updates.stdout | default('No updates available') }}"
+          - "============================================================"
