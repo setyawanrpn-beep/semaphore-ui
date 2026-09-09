@@ -1,7 +1,7 @@
 ---
 - name: Professional Linux Patching Report
   hosts: all
-  become: no
+  become: yes
   gather_facts: yes
 
   vars:
