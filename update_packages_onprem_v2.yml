@@ -1,0 +1,195 @@
+---
+- name: Professional Linux Patch Management v2
+  hosts: all
+
+  become: yes
+  become_method: sudo
+  become_user: root
+  become_flags: "-n"
+
+  gather_facts: yes
+
+  vars:
+    reboot_required_file: /var/run/reboot-required
+
+  tasks:
+
+    #################################################################
+    # 1. PRE-CHECK
+    #################################################################
+
+    - name: Show target information
+      debug:
+        msg:
+          - "Host   : {{ inventory_hostname }}"
+          - "OS     : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel : {{ ansible_kernel }}"
+
+    - name: Save kernel before patching
+      set_fact:
+        kernel_before: "{{ ansible_kernel }}"
+
+    #################################################################
+    # 2. UPDATE REPOSITORY INFORMATION
+    #################################################################
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # 3. CHECK AVAILABLE PATCHES
+    #################################################################
+
+    - name: Check available updates
+      ansible.builtin.shell: |
+        apt list --upgradable 2>/dev/null | tail -n +2
+      register: upgradable_list
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Count available updates
+      ansible.builtin.set_fact:
+        available_patch_count: "{{ upgradable_list.stdout_lines | length }}"
+      when: ansible_os_family == "Debian"
+
+    - name: Display available patches
+      ansible.builtin.debug:
+        msg:
+          - "Available patches: {{ available_patch_count }}"
+          - "{{ upgradable_list.stdout_lines }}"
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # 4. PATCHING
+    #################################################################
+
+    - name: Upgrade installed packages
+      ansible.builtin.apt:
+        upgrade: yes
+        autoremove: yes
+        autoclean: yes
+      register: patch_result
+      when:
+        - ansible_os_family == "Debian"
+        - available_patch_count | int > 0
+
+    - name: Set patch status
+      ansible.builtin.set_fact:
+        patch_status: >-
+          {{
+            'PATCHED'
+            if (patch_result.changed | default(false))
+            else 'NO UPDATE'
+          }}
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # 5. CHECK REBOOT
+    #################################################################
+
+    - name: Check whether reboot is required
+      ansible.builtin.stat:
+        path: "{{ reboot_required_file }}"
+      register: reboot_flag
+      when: ansible_os_family == "Debian"
+
+    - name: Set reboot status
+      ansible.builtin.set_fact:
+        reboot_required: "{{ reboot_flag.stat.exists | default(false) }}"
+      when: ansible_os_family == "Debian"
+
+    - name: Display reboot requirement
+      ansible.builtin.debug:
+        msg: >-
+          Reboot Required:
+          {{ 'YES' if reboot_required else 'NO' }}
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # 6. REBOOT
+    #################################################################
+
+    - name: Reboot server
+      ansible.builtin.shell: |
+        (sleep 2; sudo -n /sbin/reboot) >/dev/null 2>&1 &
+      become: false
+      async: 1
+      poll: 0
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_required
+
+    #################################################################
+    # 7. WAIT FOR SERVER
+    #################################################################
+
+    - name: Wait for server to return
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 300
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_required
+
+    #################################################################
+    # 8. POST-CHECK
+    #################################################################
+
+    - name: Gather facts after reboot
+      ansible.builtin.setup:
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_required
+
+    - name: Save kernel after patching
+      ansible.builtin.set_fact:
+        kernel_after: "{{ ansible_kernel }}"
+      when: ansible_os_family == "Debian"
+
+    - name: Check reboot flag after reboot
+      ansible.builtin.stat:
+        path: "{{ reboot_required_file }}"
+      register: reboot_flag_after
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_required
+
+    #################################################################
+    # 9. POST-PATCH UPDATE CHECK
+    #################################################################
+
+    - name: Check remaining updates
+      ansible.builtin.shell: |
+        apt list --upgradable 2>/dev/null | tail -n +2
+      register: remaining_updates
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Count remaining updates
+      ansible.builtin.set_fact:
+        remaining_patch_count: "{{ remaining_updates.stdout_lines | length }}"
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # 10. FINAL REPORT
+    #################################################################
+
+    - name: Final patch management report
+      ansible.builtin.debug:
+        msg:
+          - "=================================================="
+          - "PATCH MANAGEMENT REPORT"
+          - "=================================================="
+          - "Host              : {{ inventory_hostname }}"
+          - "OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel Before     : {{ kernel_before }}"
+          - "Kernel After      : {{ ansible_kernel }}"
+          - "Available Patches : {{ available_patch_count }}"
+          - "Patch Status      : {{ patch_status }}"
+          - "Reboot Required   : {{ 'YES' if reboot_required else 'NO' }}"
+          - "Reboot Status     : {{ 'COMPLETED' if reboot_required else 'NOT REQUIRED' }}"
+          - "Remaining Updates : {{ remaining_patch_count }}"
+          - "=================================================="
+      when: ansible_os_family == "Debian"
