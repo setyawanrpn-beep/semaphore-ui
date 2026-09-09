@@ -1,0 +1,107 @@
+---
+- name: Professional Linux Patching Report
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    reboot_required_file: /var/run/reboot-required
+
+  tasks:
+
+    #################################################################
+    # PRECHECK
+    #################################################################
+
+    - name: Show hostname
+      debug:
+        msg: "Target Host: {{ inventory_hostname }}"
+
+    - name: Show OS Version
+      debug:
+        msg: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    #################################################################
+    # CHECK AVAILABLE UPDATES
+    #################################################################
+
+    - name: Check upgradable packages (Debian/Ubuntu)
+      shell: apt list --upgradable 2>/dev/null | tail -n +2
+      register: upgradable_list
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Display available updates
+      debug:
+        var: upgradable_list.stdout_lines
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # UPDATE PROCESS
+    #################################################################
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Upgrade installed packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      register: patch_result
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # SHOW RESULT
+    #################################################################
+
+    - name: Show patch result
+      debug:
+        var: patch_result
+      when: ansible_os_family == "Debian"
+
+    #################################################################
+    # REBOOT CHECK
+    #################################################################
+
+    - name: Check reboot required
+      stat:
+        path: "{{ reboot_required_file }}"
+      register: reboot_flag
+      when: ansible_os_family == "Debian"
+
+    - name: Show reboot status
+      debug:
+        msg: "Reboot Required"
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_flag.stat.exists
+
+    - name: Show reboot status
+      debug:
+        msg: "No Reboot Required"
+      when:
+        - ansible_os_family == "Debian"
+        - not reboot_flag.stat.exists
+
+    #################################################################
+    # OPTIONAL AUTO REBOOT
+    #################################################################
+
+    - name: Reboot server if required
+      reboot:
+        msg: "Automatic reboot after patching"
+        reboot_timeout: 600
+      when:
+        - ansible_os_family == "Debian"
+        - reboot_flag.stat.exists
+
+    #################################################################
+    # FINAL SUMMARY
+    #################################################################
+
+    - name: Final summary
+      debug:
+        msg: "Patching completed successfully on {{ inventory_hostname }}"
