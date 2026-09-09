@@ -1,8 +1,13 @@
 ---
 - name: Professional Linux Patching Report
   hosts: all
+#  become: yes
+#  gather_facts: yes
+
   become: yes
-  gather_facts: yes
+  become_method: sudo
+  become_user: root
+  become_flags: "-n"
 
   vars:
     reboot_required_file: /var/run/reboot-required
