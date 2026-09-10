@@ -1,0 +1,289 @@
+---
+- name: Professional Patch Management v5 - Authorized Execution
+  hosts: all
+  gather_facts: yes
+  become: false
+
+  tasks:
+
+    # =========================================================
+    # AUTHORIZATION GATE
+    # =========================================================
+
+    - name: Validate change authorization
+      ansible.builtin.assert:
+        that:
+          - change_id is defined
+          - change_id | trim | length > 0
+          - change_approved_by is defined
+          - change_approved_by | trim | length > 0
+          - maintenance_window is defined
+          - maintenance_window | trim | length > 0
+        fail_msg: >
+          PATCH EXECUTION BLOCKED.
+          Required authorization information is incomplete.
+          Required:
+          change_id,
+          change_approved_by,
+          maintenance_window.
+        success_msg: >
+          Change authorization information is present.
+          Patch execution may proceed.
+
+    # =========================================================
+    # AUTHORIZATION EVIDENCE
+    # =========================================================
+
+    - name: Record authorization
+      ansible.builtin.set_fact:
+        authorization_time: "{{ ansible_date_time.iso8601 }}"
+
+    - name: Authorization Evidence
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "             PATCH AUTHORIZATION"
+          - "============================================================"
+          - "Authorization Time  : {{ authorization_time }}"
+          - "Change ID           : {{ change_id }}"
+          - "Approved By         : {{ change_approved_by }}"
+          - "Maintenance Window  : {{ maintenance_window }}"
+          - "Environment         : {{ var_environment | default('N/A') }}"
+          - "============================================================"
+
+    # =========================================================
+    # SYSTEM IDENTIFICATION
+    # =========================================================
+
+    - name: Record host information
+      ansible.builtin.set_fact:
+        target_host: "{{ inventory_hostname }}"
+        hostname: "{{ ansible_hostname }}"
+        primary_ip: "{{ ansible_default_ipv4.address | default(inventory_hostname) }}"
+        os_name: "{{ ansible_distribution }}"
+        os_version: "{{ ansible_distribution_version }}"
+        kernel_before: "{{ ansible_kernel }}"
+
+    - name: Record execution timestamp
+      ansible.builtin.set_fact:
+        execution_time: "{{ ansible_date_time.iso8601 }}"
+
+    # =========================================================
+    # PRE-CHECK
+    # =========================================================
+
+    - name: Check uptime
+      ansible.builtin.shell: |
+        uptime -p
+      register: uptime_result
+      changed_when: false
+      failed_when: false
+
+    - name: Check package health before patch
+      ansible.builtin.shell: |
+        dpkg --audit
+      register: dpkg_audit_before
+      changed_when: false
+      failed_when: false
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+      become: yes
+      become_method: sudo
+      become_user: root
+      become_flags: "-n"
+
+    # =========================================================
+    # PATCH ASSESSMENT
+    # =========================================================
+
+    - name: Get available updates
+      ansible.builtin.shell: |
+        apt list --upgradable 2>/dev/null | tail -n +2
+      register: available_updates
+      changed_when: false
+      failed_when: false
+
+    - name: Calculate available patch count
+      ansible.builtin.set_fact:
+        available_patch_count: >-
+          {{
+            available_updates.stdout_lines
+            | select('match', '^[^ ]+')
+            | list
+            | length
+          }}
+
+    - name: Set patch assessment
+      ansible.builtin.set_fact:
+        patch_assessment: >-
+          {{
+            'COMPLIANT'
+            if available_patch_count | int == 0
+            else 'PATCH REQUIRED'
+          }}
+
+    # =========================================================
+    # PATCH EXECUTION
+    # =========================================================
+
+    - name: Apply available patches
+      ansible.builtin.apt:
+        upgrade: yes
+        autoremove: no
+        autoclean: yes
+      become: yes
+      become_method: sudo
+      become_user: root
+      become_flags: "-n"
+      register: patch_result
+      when: available_patch_count | int > 0
+
+    - name: Determine patch status
+      ansible.builtin.set_fact:
+        patch_status: >-
+          {{
+            'NOT REQUIRED'
+            if available_patch_count | int == 0
+            else (
+              'PATCHED'
+              if patch_result.changed | default(false)
+              else 'ATTENTION'
+            )
+          }}
+
+    # =========================================================
+    # REBOOT
+    # =========================================================
+
+    - name: Check whether reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_file
+
+    - name: Set reboot requirement
+      ansible.builtin.set_fact:
+        reboot_required: "{{ reboot_file.stat.exists | default(false) }}"
+
+    - name: Reboot server
+      ansible.builtin.shell: |
+        (sleep 2; sudo -n /sbin/reboot) >/dev/null 2>&1 &
+      async: 1
+      poll: 0
+      become: false
+      when: reboot_required | bool
+
+    - name: Wait for server to return
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 300
+      when: reboot_required | bool
+
+    # =========================================================
+    # POST-CHECK
+    # =========================================================
+
+    - name: Gather facts after reboot
+      ansible.builtin.setup:
+      when: reboot_required | bool
+
+    - name: Record kernel after patch
+      ansible.builtin.set_fact:
+        kernel_after: "{{ ansible_kernel }}"
+
+    - name: Check package health after patch
+      ansible.builtin.shell: |
+        dpkg --audit
+      register: dpkg_audit_after
+      changed_when: false
+      failed_when: false
+
+    - name: Check remaining updates
+      ansible.builtin.shell: |
+        apt list --upgradable 2>/dev/null | tail -n +2
+      register: remaining_updates
+      changed_when: false
+      failed_when: false
+
+    - name: Calculate remaining patch count
+      ansible.builtin.set_fact:
+        remaining_patch_count: >-
+          {{
+            remaining_updates.stdout_lines
+            | select('match', '^[^ ]+')
+            | list
+            | length
+          }}
+
+    - name: Determine package health
+      ansible.builtin.set_fact:
+        package_health: >-
+          {{
+            'OK'
+            if dpkg_audit_after.stdout | trim == ''
+            else 'ATTENTION'
+          }}
+
+    - name: Determine reboot status
+      ansible.builtin.set_fact:
+        reboot_status: >-
+          {{
+            'COMPLETED'
+            if reboot_required | bool
+            else 'NOT REQUIRED'
+          }}
+
+    - name: Determine overall status
+      ansible.builtin.set_fact:
+        overall_status: >-
+          {{
+            'SUCCESS'
+            if (
+              remaining_patch_count | int == 0
+              and package_health == 'OK'
+            )
+            else 'ATTENTION'
+          }}
+
+    # =========================================================
+    # FINAL EVIDENCE
+    # =========================================================
+
+    - name: Patch Execution Evidence
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "       PATCH MANAGEMENT EXECUTION EVIDENCE v5"
+          - "============================================================"
+          - "Execution Time      : {{ execution_time }}"
+          - "Inventory Target    : {{ target_host }}"
+          - "Hostname            : {{ hostname }}"
+          - "Primary IP          : {{ primary_ip }}"
+          - "Environment         : {{ var_environment | default('N/A') }}"
+          - "OS                  : {{ os_name }} {{ os_version }}"
+          - "Uptime Before       : {{ uptime_result.stdout | trim }}"
+          - "Kernel Before       : {{ kernel_before }}"
+          - "------------------------------------------------------------"
+          - "CHANGE CONTROL"
+          - "Change ID           : {{ change_id }}"
+          - "Approved By         : {{ change_approved_by }}"
+          - "Maintenance Window  : {{ maintenance_window }}"
+          - "------------------------------------------------------------"
+          - "PATCH"
+          - "Available Patches   : {{ available_patch_count }}"
+          - "Assessment Status   : {{ patch_assessment }}"
+          - "Patch Action        : {{ patch_status }}"
+          - "------------------------------------------------------------"
+          - "REBOOT"
+          - "Reboot Required     : {{ reboot_required }}"
+          - "Reboot Status       : {{ reboot_status }}"
+          - "Kernel After        : {{ kernel_after }}"
+          - "------------------------------------------------------------"
+          - "POST-CHECK"
+          - "Remaining Updates   : {{ remaining_patch_count }}"
+          - "Package Health      : {{ package_health }}"
+          - "------------------------------------------------------------"
+          - "FINAL RESULT"
+          - "Overall Status      : {{ overall_status }}"
+          - "============================================================"
