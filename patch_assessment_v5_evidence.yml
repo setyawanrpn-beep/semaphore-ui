@@ -1,0 +1,144 @@
+---
+- name: Patch Management - Weekly Assessment with Evidence
+  hosts: all
+  gather_facts: yes
+  become: false
+
+  vars:
+    evidence_root: "/patch-evidence/Assessment"
+
+  tasks:
+
+    - name: Capture assessment execution time
+      ansible.builtin.command: "date '+%Y-%m-%d %H:%M:%S %Z'"
+      delegate_to: localhost
+      run_once: true
+      register: assessment_timestamp
+      changed_when: false
+
+    - name: Capture evidence date and path
+      ansible.builtin.command: "date '+%Y/%m'"
+      delegate_to: localhost
+      run_once: true
+      register: evidence_month
+      changed_when: false
+
+    - name: Capture evidence filename timestamp
+      ansible.builtin.command: "date '+%Y-%m-%d_%H%M%S'"
+      delegate_to: localhost
+      run_once: true
+      register: evidence_file_timestamp
+      changed_when: false
+
+    - name: Check package database health
+      ansible.builtin.shell: |
+        /usr/bin/dpkg --audit
+      register: dpkg_audit
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Update apt cache for assessment
+      ansible.builtin.shell: |
+        sudo -n /usr/bin/apt-get update -qq
+      register: apt_update
+      changed_when: false
+      failed_when: apt_update.rc != 0
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Check available updates
+      ansible.builtin.shell: |
+        apt list --upgradable 2>/dev/null |
+        awk 'NR > 1 { count++ } END { print count+0 }'
+      register: available_updates
+      changed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Check reboot requirement
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Calculate assessment status
+      ansible.builtin.set_fact:
+        patch_count: "{{ available_updates.stdout | default('0') | int }}"
+        patch_status: >-
+          {{
+            'PATCH REQUIRED'
+            if (available_updates.stdout | default('0') | int) > 0
+            else 'COMPLIANT'
+          }}
+        reboot_status: >-
+          {{
+            'YES'
+            if (reboot_required.stat.exists | default(false))
+            else 'NO'
+          }}
+        package_health: >-
+          {{
+            'OK'
+            if (dpkg_audit.stdout | default('') | trim == '')
+            else 'ATTENTION'
+          }}
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Set unsupported OS assessment values
+      ansible.builtin.set_fact:
+        patch_count: 0
+        patch_status: "ATTENTION"
+        reboot_status: "N/A"
+        package_health: "N/A"
+      when: ansible_facts.os_family != "Debian"
+
+    - name: Show assessment result
+      ansible.builtin.debug:
+        msg:
+          - "Assessment Time: {{ hostvars['localhost']['assessment_timestamp'].stdout | default('N/A') }}"
+          - "Target: {{ inventory_hostname }}"
+          - "Hostname: {{ ansible_facts.hostname }}"
+          - "Primary IP: {{ ansible_facts.default_ipv4.address | default(ansible_host | default(inventory_hostname)) }}"
+          - "OS: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Available Patches: {{ patch_count }}"
+          - "Reboot Required: {{ reboot_status }}"
+          - "Package Health: {{ package_health }}"
+          - "Assessment Status: {{ patch_status }}"
+
+    - name: Ensure evidence directory exists
+      ansible.builtin.file:
+        path: "{{ evidence_root }}/{{ hostvars['localhost']['evidence_month'].stdout }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Generate weekly assessment CSV evidence
+      ansible.builtin.copy:
+        dest: >-
+          {{ evidence_root }}/{{ hostvars['localhost']['evidence_month'].stdout }}/
+          {{ hostvars['localhost']['evidence_file_timestamp'].stdout }}_Patch_Assessment.csv
+        mode: "0644"
+        content: |
+          Assessment Date,Inventory Target,Hostname,Primary IP,Environment,OS,Available Patches,Reboot Required,Package Health,Assessment Status,Change ID,Approval Reference,Execution Date,Patch Action,Kernel Before,Kernel After,Remaining Updates,Post-Check,Overall Status,Evidence / Task ID,Remarks
+          {% for host in ansible_play_hosts_all %}
+          {{ hostvars['localhost']['assessment_timestamp'].stdout | default('') | replace(',', ' ') }},{{ host }},{{ hostvars[host]['ansible_facts']['hostname'] | default('') }},{{ hostvars[host]['ansible_facts']['default_ipv4']['address'] | default(hostvars[host]['ansible_host'] | default(host)) }},{{ hostvars[host]['var_environment'] | default('') }},{{ hostvars[host]['ansible_facts']['distribution'] | default('') }} {{ hostvars[host]['ansible_facts']['distribution_version'] | default('') }},{{ hostvars[host]['patch_count'] | default(0) }},{{ hostvars[host]['reboot_status'] | default('N/A') }},{{ hostvars[host]['package_health'] | default('N/A') }},{{ hostvars[host]['patch_status'] | default('ATTENTION') }},,,,"",,,,{{ hostvars[host]['patch_status'] | default('ATTENTION') }},,,Scheduled weekly assessment
+          {% endfor %}
+
+    - name: Find generated assessment evidence
+      ansible.builtin.find:
+        paths: "{{ evidence_root }}/{{ hostvars['localhost']['evidence_month'].stdout }}"
+        patterns: "*_Patch_Assessment.csv"
+        age: "-1h"
+        recurse: false
+      register: generated_evidence
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display evidence location
+      ansible.builtin.debug:
+        msg:
+          - "Patch assessment evidence generated successfully."
+          - "Location: {{ generated_evidence.files[0].path | default('N/A') }}"
+          - "Stored on Semaphore host via /patch-evidence bind mount."
+      delegate_to: localhost
+      run_once: true
